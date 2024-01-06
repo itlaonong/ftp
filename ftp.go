@@ -8,14 +8,15 @@ import (
 	"context"
 	"crypto/tls"
 	"errors"
+	"fmt"
+	"github.com/hashicorp/go-multierror"
+	"github.com/jlaffaye/ftp/codec"
 	"io"
 	"net"
 	"net/textproto"
 	"strconv"
 	"strings"
 	"time"
-
-	"github.com/hashicorp/go-multierror"
 )
 
 const (
@@ -85,6 +86,7 @@ type dialOptions struct {
 	debugOutput     io.Writer
 	dialFunc        func(network, address string) (net.Conn, error)
 	shutTimeout     time.Duration // time to wait for data connection closing status
+	charset         *string       //通讯的编码，为了支持非utf8时的中文
 }
 
 // Entry describes a file and is returned by List().
@@ -177,6 +179,12 @@ func Dial(addr string, options ...DialOption) (*ServerConn, error) {
 	}
 
 	return c, nil
+}
+
+func DialWithCharset(charset string) DialOption {
+	return DialOption{func(do *dialOptions) {
+		do.charset = &charset
+	}}
 }
 
 // DialWithTimeout returns a DialOption that configures the ServerConn with specified timeout
@@ -602,7 +610,13 @@ func (c *ServerConn) openDataConn() (net.Conn, error) {
 // cmd is a helper function to execute a command and check for the expected FTP
 // return code
 func (c *ServerConn) cmd(expected int, format string, args ...interface{}) (int, string, error) {
-	_, err := c.conn.Cmd(format, args...)
+	format = fmt.Sprintf(format, args...)
+	if c.options.charset != nil && *c.options.charset == "GBK" {
+		gbk, _ := codec.Utf8ToGbk([]byte(format))
+		format = string(gbk)
+
+	}
+	_, err := c.conn.Cmd(format)
 	if err != nil {
 		return 0, "", err
 	}
@@ -634,8 +648,14 @@ func (c *ServerConn) cmdDataConnFrom(offset uint64, format string, args ...inter
 			return nil, err
 		}
 	}
+	format = fmt.Sprintf(format, args...)
+	if c.options.charset != nil && *c.options.charset == "GBK" {
+		gbk, _ := codec.Utf8ToGbk([]byte(format))
+		format = string(gbk)
 
-	_, err = c.conn.Cmd(format, args...)
+	}
+	_, err = c.conn.Cmd(format)
+	// _, err = c.conn.Cmd(format, args...)
 	if err != nil {
 		_ = conn.Close()
 		return nil, err
@@ -677,7 +697,12 @@ func (c *ServerConn) NameList(path string) (entries []string, err error) {
 
 	scanner := bufio.NewScanner(c.options.wrapStream(r))
 	for scanner.Scan() {
-		entries = append(entries, scanner.Text())
+		text := scanner.Text()
+		if c.options.charset != nil && *c.options.charset == "GBK" {
+			gbk, _ := codec.GbkToUtf8([]byte(text))
+			text = string(gbk)
+		}
+		entries = append(entries, text)
 	}
 
 	if err := scanner.Err(); err != nil {
@@ -722,7 +747,12 @@ func (c *ServerConn) List(path string) (entries []*Entry, err error) {
 	scanner := bufio.NewScanner(c.options.wrapStream(r))
 	now := time.Now()
 	for scanner.Scan() {
-		entry, errParse := parser(scanner.Text(), now, c.options.location)
+		text := scanner.Text()
+		if c.options.charset != nil && *c.options.charset == "GBK" {
+			gbk, _ := codec.GbkToUtf8([]byte(text))
+			text = string(gbk)
+		}
+		entry, errParse := parser(text, now, c.options.location)
 		if errParse == nil {
 			entries = append(entries, entry)
 		}
